@@ -15,14 +15,6 @@
 # include "config.h"
 #endif
 
-/* _XOPEN_SOURCE is known to break compilation under OpenBSD. */
-#ifndef OPENBSD
-# undef _XOPEN_SOURCE
-# define _XOPEN_SOURCE  500 /* for usleep() */
-#endif
-
-#define DEBUG
-
 #include <stdlib.h>
 #include <inttypes.h>
 #include <alsa/asoundlib.h>
@@ -30,6 +22,8 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+
+#define DEBUG
 
 #include "common.h"
 #include "server.h"
@@ -43,12 +37,14 @@ static snd_pcm_t *handle = NULL;
 
 static struct
 {
-	unsigned channels;
-	unsigned rate;
+	unsigned int channels;
+	unsigned int rate;
 	snd_pcm_format_t format;
 } params = { 0, 0, SND_PCM_FORMAT_UNKNOWN };
 
-static int chunk_size = -1; /* in frames */
+static snd_pcm_uframes_t buffer_frames;
+static snd_pcm_uframes_t chunk_frames;
+static int chunk_bytes = -1;
 static char alsa_buf[512 * 1024];
 static int alsa_buf_fill = 0;
 static int bytes_per_frame;
@@ -73,12 +69,36 @@ static int real_volume2 = -1;
 #define scale_volume1(v) ((v) - mixer1_min) * 100 / (mixer1_max - mixer1_min)
 #define scale_volume2(v) ((v) - mixer2_min) * 100 / (mixer2_max - mixer2_min)
 
+#ifndef NDEBUG
+static void alsa_log_cb (const char *unused1 ATTR_UNUSED,
+                         int unused2 ATTR_UNUSED,
+                         const char *unused3 ATTR_UNUSED,
+                         int unused4 ATTR_UNUSED, const char *fmt, ...)
+{
+	char *msg;
+	va_list va;
+
+	assert (fmt);
+
+	va_start (va, fmt);
+	msg = format_msg_va (fmt, va);
+	va_end (va);
+
+	logit ("ALSA said: %s", msg);
+	free (msg);
+}
+#endif
+
 static void alsa_shutdown ()
 {
 	int err;
 
 	if (mixer_handle && (err = snd_mixer_close(mixer_handle)) < 0)
 		logit ("Can't close mixer: %s", snd_strerror(err));
+
+#ifndef NDEBUG
+	snd_lib_error_set_handler (NULL);
+#endif
 }
 
 /* Fill caps with the device capabilities. Return 0 on error. */
@@ -87,7 +107,7 @@ static int fill_capabilities (struct output_driver_caps *caps)
 	snd_pcm_hw_params_t *hw_params;
 	snd_pcm_format_mask_t *format_mask;
 	int err;
-	unsigned val;
+	unsigned int val;
 
 	if ((err = snd_pcm_open(&handle, options_get_str("AlsaDevice"),
 					SND_PCM_STREAM_PLAYBACK,
@@ -172,26 +192,24 @@ static void handle_mixer_events (snd_mixer_t *mixer_handle)
 				snd_strerror(count));
 	else {
 		struct pollfd *fds;
-		int err;
+		int rc;
 
 		fds = xcalloc (count, sizeof(struct pollfd));
 
-		if ((err = snd_mixer_poll_descriptors(mixer_handle, fds,
+		if ((rc = snd_mixer_poll_descriptors(mixer_handle, fds,
 						count)) < 0)
 			logit ("snd_mixer_poll_descriptors() failed: %s",
-					snd_strerror(count));
+					snd_strerror(rc));
 		else {
-			err = poll (fds, count, 0);
-			if (err < 0)
-				error ("poll() failed: %s", strerror(errno));
-			else if (err > 0) {
+			rc = poll (fds, count, 0);
+			if (rc < 0)
+				error_errno ("poll() failed", errno);
+			else if (rc > 0) {
 				debug ("Mixer event");
-				if ((err = snd_mixer_handle_events(mixer_handle)
-							) < 0)
+				if ((rc = snd_mixer_handle_events(mixer_handle)) < 0)
 					logit ("snd_mixer_handle_events() failed: %s",
-							snd_strerror(err));
+							snd_strerror(rc));
 			}
-
 		}
 
 		free (fds);
@@ -272,15 +290,20 @@ static snd_mixer_elem_t *alsa_init_mixer_channel (const char *name,
 static int alsa_init (struct output_driver_caps *caps)
 {
 	int err;
+	const char *device;
 
-	logit ("Initialising ALSA device");
+	device = options_get_str ("ALSADevice");
+	logit ("Initialising ALSA device: %s", device);
+
+#ifndef NDEBUG
+	snd_lib_error_set_handler (alsa_log_cb);
+#endif
 
 	if ((err = snd_mixer_open(&mixer_handle, 0)) < 0) {
 		error ("Can't open ALSA mixer: %s", snd_strerror(err));
 		mixer_handle = NULL;
 	}
-	else if ((err = snd_mixer_attach(mixer_handle,
-					options_get_str("AlsaDevice"))) < 0) {
+	else if ((err = snd_mixer_attach(mixer_handle, device)) < 0) {
 		snd_mixer_close (mixer_handle);
 		mixer_handle = NULL;
 		error ("Can't attach mixer: %s", snd_strerror(err));
@@ -346,9 +369,8 @@ static int alsa_open (struct sound_params *sound_params)
 	int err;
 	unsigned int period_time;
 	unsigned int buffer_time;
-	snd_pcm_uframes_t chunk_frames;
-	snd_pcm_uframes_t buffer_frames;
 	char fmt_name[128];
+	const char *device;
 
 	switch (sound_params->fmt & SFMT_MASK_FORMAT) {
 		case SFMT_S8:
@@ -376,7 +398,10 @@ static int alsa_open (struct sound_params *sound_params)
 			return 0;
 	}
 
-	if ((err = snd_pcm_open(&handle, options_get_str("AlsaDevice"),
+	device = options_get_str ("ALSADevice");
+	logit ("Opening ALSA device: %s", device);
+
+	if ((err = snd_pcm_open(&handle, device,
 					SND_PCM_STREAM_PLAYBACK,
 					SND_PCM_NONBLOCK)) < 0) {
 		error ("Can't open audio: %s", snd_strerror(err));
@@ -409,6 +434,8 @@ static int alsa_open (struct sound_params *sound_params)
 		return 0;
 	}
 
+	logit ("Set sample width: %d bytes", sfmt_Bps (sound_params->fmt));
+
 	params.rate = sound_params->rate;
 	if ((err = snd_pcm_hw_params_set_rate_near (handle, hw_params,
 					&params.rate, 0)) < 0) {
@@ -417,7 +444,7 @@ static int alsa_open (struct sound_params *sound_params)
 		return 0;
 	}
 
-	logit ("Set rate to %u", params.rate);
+	logit ("Set rate: %uHz", params.rate);
 
 	if ((err = snd_pcm_hw_params_set_channels (handle, hw_params,
 					sound_params->channels)) < 0) {
@@ -425,6 +452,8 @@ static int alsa_open (struct sound_params *sound_params)
 		snd_pcm_hw_params_free (hw_params);
 		return 0;
 	}
+
+	logit ("Set channels: %d", sound_params->channels);
 
 	if ((err = snd_pcm_hw_params_get_buffer_time_max(hw_params,
 					&buffer_time, 0)) < 0) {
@@ -458,13 +487,17 @@ static int alsa_open (struct sound_params *sound_params)
 	}
 
 	snd_pcm_hw_params_get_period_size (hw_params, &chunk_frames, 0);
+	debug ("Chunk size: %lu frames", chunk_frames);
+
 	snd_pcm_hw_params_get_buffer_size (hw_params, &buffer_frames);
+	debug ("Buffer size: %lu frames", buffer_frames);
+	debug ("Buffer time: %"PRIu64"us",
+	        (uint64_t) buffer_frames * UINT64_C(1000000) / params.rate);
 
-	bytes_per_frame = sound_params->channels
-		* sfmt_Bps(sound_params->fmt);
+	bytes_per_frame = sound_params->channels * sfmt_Bps(sound_params->fmt);
+	debug ("Frame size: %d bytes", bytes_per_frame);
 
-	logit ("Buffer time: %"PRIu64"us",
-	       (uint64_t) buffer_frames * 1000000 / params.rate);
+	chunk_bytes = chunk_frames * bytes_per_frame;
 
 	if (chunk_frames == buffer_frames) {
 		error ("Can't use period equal to buffer size (%lu == %lu)",
@@ -472,10 +505,6 @@ static int alsa_open (struct sound_params *sound_params)
 		snd_pcm_hw_params_free (hw_params);
 		return 0;
 	}
-
-	chunk_size = chunk_frames * bytes_per_frame;
-
-	debug ("Chunk size: %d", chunk_size);
 
 	snd_pcm_hw_params_free (hw_params);
 
@@ -498,51 +527,46 @@ static int alsa_open (struct sound_params *sound_params)
 static int play_buf_chunks ()
 {
 	int written = 0;
+	bool zero_logged = false;
 
-	while (alsa_buf_fill >= chunk_size) {
-		int err;
+	while (alsa_buf_fill >= chunk_bytes) {
+		int rc;
 
-		err = snd_pcm_writei (handle, alsa_buf + written,
-				chunk_size / bytes_per_frame);
-		if (err == -EAGAIN) {
-			if (snd_pcm_wait(handle, 500) < 0)
-				logit ("snd_pcm_wait() failed");
-		}
-		else if (err == -EPIPE) {
-			logit ("underrun!");
-			if ((err = snd_pcm_prepare(handle)) < 0) {
-				error ("Can't recover after underrun: %s",
-						snd_strerror(err));
-				/* TODO: reopen the device */
-				return -1;
+		rc = snd_pcm_writei (handle, alsa_buf + written,
+				chunk_bytes / bytes_per_frame);
+
+		if (rc == 0) {
+			if (!zero_logged) {
+				debug ("Played 0 bytes");
+				zero_logged = true;
 			}
+			continue;
 		}
-		else if (err == -ESTRPIPE) {
-			logit ("Suspend, trying to resume");
-			while ((err = snd_pcm_resume(handle))
-					== -EAGAIN)
-				sleep (1);
-			if (err < 0) {
-				logit ("Failed, restarting");
-				if ((err = snd_pcm_prepare(handle))
-						< 0) {
-					error ("Failed to restart device: %s",
-							snd_strerror(err));
-					return -1;
-				}
-			}
-		}
-		else if (err < 0) {
-			error ("Can't play: %s", snd_strerror(err));
-			return -1;
-		}
-		else {
-			int written_bytes = err * bytes_per_frame;
+
+		zero_logged = false;
+
+		if (rc > 0) {
+			int written_bytes = rc * bytes_per_frame;
 
 			written += written_bytes;
 			alsa_buf_fill -= written_bytes;
 
 			debug ("Played %d bytes", written_bytes);
+			continue;
+		}
+
+		rc = snd_pcm_recover (handle, rc, 0);
+
+		switch (rc) {
+		case 0:
+			break;
+		case -EAGAIN:
+			if (snd_pcm_wait (handle, 500) < 0)
+				logit ("snd_pcm_wait() failed");
+			break;
+		default:
+			error ("Can't play: %s", snd_strerror (rc));
+			return -1;
 		}
 	}
 
@@ -560,13 +584,13 @@ static void alsa_close ()
 
 	/* play what remained in the buffer */
 	if (alsa_buf_fill) {
-		assert (alsa_buf_fill < chunk_size);
+		assert (alsa_buf_fill < chunk_bytes);
 
 		snd_pcm_format_set_silence (params.format,
 				alsa_buf + alsa_buf_fill,
-				(chunk_size - alsa_buf_fill) / bytes_per_frame
+				(chunk_bytes - alsa_buf_fill) / bytes_per_frame
 				* params.channels);
-		alsa_buf_fill = chunk_size;
+		alsa_buf_fill = chunk_bytes;
 		play_buf_chunks ();
 	}
 
@@ -576,13 +600,16 @@ static void alsa_close ()
 	 * the SVN commit log for r2550).  Instead we sleep for the duration
 	 * of the still unplayed samples. */
 	if (snd_pcm_delay (handle, &delay) == 0)
-		usleep ((uint64_t) delay * 1000000 / params.rate);
+		xsleep (delay, params.rate);
 	snd_pcm_close (handle);
 	logit ("ALSA device closed");
 
 	params.format = 0;
 	params.rate = 0;
 	params.channels = 0;
+	buffer_frames = 0;
+	chunk_frames = 0;
+	chunk_bytes = -1;
 	handle = NULL;
 }
 
@@ -591,14 +618,14 @@ static int alsa_play (const char *buff, const size_t size)
 	int to_write = size;
 	int buf_pos = 0;
 
-	assert (chunk_size > 0);
+	assert (chunk_bytes > 0);
 
 	debug ("Got %zu bytes to play", size);
 
 	while (to_write) {
-		int to_copy = MIN((size_t)to_write,
-				sizeof(alsa_buf) - (size_t)alsa_buf_fill);
+		int to_copy;
 
+		to_copy = MIN(to_write, ssizeof(alsa_buf) - alsa_buf_fill);
 		memcpy (alsa_buf + alsa_buf_fill, buff + buf_pos, to_copy);
 		to_write -= to_copy;
 		buf_pos += to_copy;
@@ -662,7 +689,7 @@ static void alsa_set_mixer (int vol)
 			real_vol = &real_volume2;
 		}
 
-		vol_alsa = vol * (mixer_max - mixer_min) / 100;
+		vol_alsa = vol * (mixer_max - mixer_min) / 100 + mixer_min;
 
 		debug ("Setting vol to %ld", vol_alsa);
 
