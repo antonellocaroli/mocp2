@@ -17,6 +17,7 @@
 
 /* _XOPEN_SOURCE is known to break compilation under OpenBSD. */
 #ifndef OPENBSD
+# undef _XOPEN_SOURCE
 # define _XOPEN_SOURCE  500 /* for usleep() */
 #endif
 
@@ -178,7 +179,7 @@ static void handle_mixer_events (snd_mixer_t *mixer_handle)
 		if ((err = snd_mixer_poll_descriptors(mixer_handle, fds,
 						count)) < 0)
 			logit ("snd_mixer_poll_descriptors() failed: %s",
-					snd_strerror(err));
+					snd_strerror(count));
 		else {
 			err = poll (fds, count, 0);
 			if (err < 0)
@@ -336,21 +337,7 @@ static int alsa_init (struct output_driver_caps *caps)
 		mixer_handle = NULL;
 	}
 
-	err = fill_capabilities (caps);
-
-	if (err != 0 &&
-	    sizeof (long) < 8 && options_was_defaulted ("ALSAStutterDefeat")) {
-		fprintf (stderr,
-		         "\n"
-		         "Warning: Your system may be vulnerable to stuttering audio.\n"
-		         "         You should read the example configuration file comments\n"
-		         "         for the 'ALSAStutterDefeat' option and set it accordingly.\n"
-		         "         Setting the option will remove this warning.\n"
-		         "\n");
-		sleep (5);
-	}
-
-	return err;
+	return fill_capabilities (caps);
 }
 
 static int alsa_open (struct sound_params *sound_params)
@@ -420,14 +407,6 @@ static int alsa_open (struct sound_params *sound_params)
 		error ("Can't set sample format: %s", snd_strerror(err));
 		snd_pcm_hw_params_free (hw_params);
 		return 0;
-	}
-
-	if (options_get_bool ("ALSAStutterDefeat")) {
-		err = snd_pcm_hw_params_set_rate_resample (handle, hw_params, 0);
-		if (err == 0)
-			logit ("ALSA resampling disabled");
-		else
-			logit ("Unable to disable ALSA resampling: %s", snd_strerror(err));
 	}
 
 	params.rate = sound_params->rate;
@@ -596,7 +575,7 @@ static void alsa_close ()
 	 * here; there are two bugs in ALSA which make it a bad idea (see
 	 * the SVN commit log for r2550).  Instead we sleep for the duration
 	 * of the still unplayed samples. */
-	if (snd_pcm_delay (handle, &delay) == 0 && delay > 0)
+	if (snd_pcm_delay (handle, &delay) == 0)
 		usleep ((uint64_t) delay * 1000000 / params.rate);
 	snd_pcm_close (handle);
 	logit ("ALSA device closed");
@@ -683,7 +662,7 @@ static void alsa_set_mixer (int vol)
 			real_vol = &real_volume2;
 		}
 
-		vol_alsa = vol * (mixer_max - mixer_min) / 100 + mixer_min;
+		vol_alsa = vol * (mixer_max - mixer_min) / 100;
 
 		debug ("Setting vol to %ld", vol_alsa);
 
