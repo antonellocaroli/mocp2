@@ -1,0 +1,35 @@
+commit 342d8b15ca700863c9d4bf1fcea8769ae1eb593f
+Author: John Fitzgerald <jcf@home>
+Date:   Sat Oct 29 21:23:40 2016 +0000
+
+    Fix: Freeze on Nokia devices when audio plays to completion.
+    
+    This circumvents a freeze of the MOC server when running on a
+    Nokia N810 tablet (and probably devices with similar soundcards).
+    
+    If playing is not manually stopped and no other audio files are to
+    be played when the current audio file reaches the end (either because
+    the directory/playlist is exhausted or the 'AutoNext' toggle is off)
+    then the server effectively enters a infinite duration sleep.
+    
+    The problem arises from an undocumented (and probably erroneous)
+    negative frame count delay value returned by ALSA's snd_pcm_delay()
+    function.
+    
+    Resolves: node/1568 (MOC Freezes on a Nokia N810 Tablet)
+    
+    git-svn-id: svn://svn.daper.net/moc/trunk@2920 910807d9-36e0-0310-a014-e9ea483e2ba4
+
+Index: x/moc-t1/alsa.c
+===================================================================
+--- x.orig/moc-t1/alsa.c	2022-01-17 10:33:37.931455244 +1300
++++ x/moc-t1/alsa.c	2022-01-17 10:34:21.230451227 +1300
+@@ -713,7 +713,7 @@ static void alsa_close ()
+ 	 * here; there are two bugs in ALSA which make it a bad idea (see
+ 	 * the SVN commit log for r2550).  Instead we sleep for the duration
+ 	 * of the still unplayed samples. */
+-	if (snd_pcm_delay (handle, &delay) == 0)
++	if (snd_pcm_delay (handle, &delay) == 0 && delay > 0)
+ 		xsleep (delay, params.rate);
+ 	snd_pcm_close (handle);
+ 	logit ("ALSA device closed");

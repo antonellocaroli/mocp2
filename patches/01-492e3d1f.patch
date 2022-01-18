@@ -1,0 +1,15 @@
+commit 492e3d1f88b59e836e9f891e2f38909daed38bed
+Author: John Fitzgerald <jcf@home>
+Date:   Fri Jul 1 04:46:29 2016 +0000
+
+    ALSA: Use fixed percentage scale for volume manipulation.
+    
+    This fixes a drift in displayed volume percentage after it has been
+    increased and decreased several times or MOC is stopped and restarted
+    where the displayed volume does not return to its original value.
+    
+    It interoperates consistantly with mplayer, but other players have
+    not been tested.
+    
+    git-svn-id: svn://svn.daper.net/moc/trunk@2896 910807d9-36e0-0310-a014-e9ea483e2ba4
+

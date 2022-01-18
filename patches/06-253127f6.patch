@@ -1,0 +1,50 @@
+commit 253127f6ba1dd6f6cde87986fdeb1a911ccedca8
+Author: John Fitzgerald <jcf@home>
+Date:   Wed Jul 20 04:20:04 2016 +0000
+
+    ALSA: Cross-check MOC's size calculations against ALSA's.
+    
+    This is a useful integrity check but using ALSA's conversion
+    functions in non-debugging code offers no benefit over MOC's own
+    direct calculation and incurs the additional overhead of a function
+    call.  (This assumes the calculations are linear and the initial
+    values hold for the duration of the entire audio.)
+    
+    git-svn-id: svn://svn.daper.net/moc/trunk@2901 910807d9-36e0-0310-a014-e9ea483e2ba4
+
+Index: x/moc-t1/alsa.c
+===================================================================
+--- x.orig/moc-t1/alsa.c	2022-01-17 10:32:38.229460781 +1300
++++ x/moc-t1/alsa.c	2022-01-17 10:33:06.058458200 +1300
+@@ -33,6 +33,21 @@
+ 
+ #define BUFFER_MAX_USEC	300000
+ 
++/* Check that ALSA's and MOC's byte/sample/frame conversions agree. */
++#ifndef NDEBUG
++# define ALSA_CHECK(fn,val) \
++	 do { \
++		long v = val; \
++		ssize_t ssz = snd_pcm_##fn (handle, 1); \
++		if (ssz < 0) \
++			debug ("CHECK: snd_pcm_%s() failed: %s", #fn, snd_strerror (ssz)); \
++		else if (v != ssz) \
++			debug ("CHECK: snd_pcm_%s() = %zd (vs %ld)", #fn, ssz, v); \
++	} while (0)
++#else
++# define ALSA_CHECK(...) do {} while (0)
++#endif
++
+ static snd_pcm_t *handle = NULL;
+ 
+ static struct
+@@ -593,6 +608,9 @@ static int alsa_open (struct sound_param
+ 		goto err;
+ 	}
+ 
++	ALSA_CHECK (samples_to_bytes, bytes_per_sample);
++	ALSA_CHECK (frames_to_bytes, bytes_per_frame);
++
+ 	logit ("ALSA device opened");
+ 
+ 	params.channels = sound_params->channels;

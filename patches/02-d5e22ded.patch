@@ -1,0 +1,50 @@
+commit d5e22ded819aa38915c50f4be7dffe7f9bb6717a
+Author: John Fitzgerald <jcf@home>
+Date:   Fri Jul 1 04:46:34 2016 +0000
+
+    ALSA: Shortcircuit volume setting when channels are joined.
+    
+    From: John Fitzgerald <jcf@home>
+    
+    When the channels are "joined" then setting the volume in one sets it in
+    all.
+    
+    This patch is based on one contributed by user "exc" which was obsoleted
+    by r2318.
+    
+    Thanks to: User "exc"
+    Also see: node/694 and r2318
+    
+    git-svn-id: svn://svn.daper.net/moc/trunk@2897 910807d9-36e0-0310-a014-e9ea483e2ba4
+
+Index: x/moc-t1/alsa.c
+===================================================================
+--- x.orig/moc-t1/alsa.c	2022-01-17 10:28:51.290481832 +1300
++++ x/moc-t1/alsa.c	2022-01-17 10:29:44.846476864 +1300
+@@ -208,6 +208,7 @@ static void handle_mixer_events (snd_mix
+ static int alsa_read_mixer_raw (snd_mixer_elem_t *elem)
+ {
+ 	int rc, nchannels = 0, volume = 0;
++	bool joined;
+ 	snd_mixer_selem_channel_id_t chan_id;
+ 
+ 	if (!mixer_handle)
+@@ -217,6 +218,8 @@ static int alsa_read_mixer_raw (snd_mixe
+ 
+ 	handle_mixer_events (mixer_handle);
+ 
++	joined = snd_mixer_selem_has_playback_volume_joined (elem);
++
+ 	for (chan_id = 0; chan_id < SND_MIXER_SCHN_LAST; chan_id += 1) {
+ 		if (snd_mixer_selem_has_playback_channel (elem, chan_id)) {
+ 			long vol;
+@@ -243,6 +246,9 @@ static int alsa_read_mixer_raw (snd_mixe
+ 
+ 			volume += vol;
+ 		}
++
++		if (joined)
++			break;
+ 	}
+ 
+ 	if (nchannels == 0) {

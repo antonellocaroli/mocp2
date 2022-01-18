@@ -1,0 +1,172 @@
+commit 5cc9dd90c45fc0fc03797dbb04ee4d382a1c6e7a
+Author: John Fitzgerald <jcf@home>
+Date:   Sun Nov 13 06:55:42 2016 +0000
+
+    ALSA: Circumvent ALSA stutter bug.
+    
+    This bug manifests itself as a stutter after many hours of
+    continously playing the same audio file or stream.  The stutter
+    is audible as the repetition of a sub-second portion of the audio
+    followed by a skip to some later portion and the repeat of the
+    stutter.  The stutter may or may not resolve itself after some time.
+    The playing duration before the stuttering starts is variable,
+    but around 373 and 650 minutes is common.
+    
+    At the heart of the problem lies an integer overflow bug during
+    the resampling process of ALSA's dmix component.  This bug has been
+    apparently reported on the ALSA Project's Bug Tracker [1] and the
+    associated Wiki [2].  Unfortunately, those services are defunct [3]
+    and there seems no way to access the information they held (even
+    using the Wayback Machine [4]); the links to their Bug Tracker on
+    the ALSA Project's [5] web pages remain broken.
+    
+    A good technical write up of the ALSA bug and a proposed fix was
+    provided by Andrew Church [6], but as at this time his solution
+    has not been implemented.
+    
+    The problem occurs when the default dmix sample rate (as set
+    by 'defaults.pcm.dmix.rate' in '/usr/share/alsa/alsa.conf'
+    or in different ways in '/usr/share/alsa/pcm/dmix.conf' or in
+    '~/.asoundrc') is not the same as the sample rate asked for by
+    snd_pcm_hw_params_set_rate_near() in MOC.  ALSA responds with the
+    rate requested and then performs a resampling to its default dmix
+    rate privately.  It does this so the audio streams from different
+    applications and at differnt sample rates can be merged by dmix
+    at the same sample rate and sent to the same hardware device.
+    Unfortunately, that resampling process is bugged (although testing
+    indicates that the further resampling which may occur between dmix
+    and the hardware device is not).
+    
+    This account accounts for why the stutter does not appear when the
+    audio's sample rate happens to match dmix's internal rate (because
+    it does not have to resample), when the audio is sent directly to
+    an ALSA hardware device (because dmix isn't on the audio path),
+    or when running on a 64-bit machine (the durations above relate to
+    32-bit machines; 64-bit machines have durations measured in millions
+    of years).
+    
+    The first of these also accounts for why the stutter does not
+    manifest when MOC's "ForceSampleRate" configuration option is used
+    and set to a value corresponding to dmix's internal rate.  That is
+    because it invokes MOC's own resampling capability to convert the
+    audio stream before it is passed to ALSA at a rate which does not
+    subsequently need to be resampled by dmix.
+    
+    Setting "ForceSampleRate" to dmix's internal rate offers a
+    user-configurable solution to the ALSA stutter bug, but there are
+    several considerations in doing so:
+    
+    1. From the users' point of view, the "ForceSampleRate" option is
+       not obviously associated with the stuttering audio experienced.
+       Further, even if it is, finding the value to which it should be
+       set may prove challenging.  It requires a deeper knowledge of
+       MOC and ALSA than users should be expected to have.
+    
+    2. If the user gets the value of the "ForceSampleRate" option wrong,
+       then the effect is to insert an additional resampling step into
+       the audio flow if the selected rate does not match the rate of
+       the audio.  Again, there are obvious performance and possible
+       latency issues.
+    
+    3. MOC's own resampling capability uses floating-point arithmetic,
+       and when running on chips without a hardware floating-point
+       implementation the CPU usage may be pegged at 100% by the
+       floating-point emulation software.  There are obvious performance
+       and possible latency issues.
+    
+    4. ALSA allows the user to select from a variety of resampler
+       plug-ins, each of which has different quality and resource usage
+       trade-offs.  If MOC is doing the resampling then the selection of
+       resampling algorithms is much more limited (but may be expanded
+       in the future).
+    
+    The simple solution is to invoke ALSA's
+    snd_pcm_hw_params_set_rate_resample() function to turn off dmix's
+    resampling and therefore have it present the actual rate it requires,
+    thereby causing MOC to do the resampling (with some of the same
+    considerations as setting "ForceSampleRate").  However, given
+    the concerns documented above and small number of users expected
+    to actually encounter the ALSA stutter bug, the better approach
+    would seem to be to provide a well-commented "ALSAStutterDefeat"
+    option and let users decide for themselves whether the impact of
+    the bug or the remedy is the greater in their case and then set
+    the option accordingly.
+    
+    The pursuit of this bug was extremely frustrating.  Firstly,
+    mocmaint could never reproduce it (because it only emerged in
+    reasonable time on a 32-bit machine) and so was reliant on remote
+    debugging by e-mail and the good will and availablity of those
+    who reported it.  Secondly, the long time to failure meant many
+    of the usual tools required too much HDD space for logging and it
+    was too long for hands-on monitoring.  Interactive debugging was
+    too disruptive to the playing process to be viable.  The timings
+    involved suggested an integer overflow, but it was nowhere apparant
+    that it was actually occurring in MOC code despite many hours of
+    desk checking and code diving.
+    
+    Many of the test results were contradictory.  In retrospect,
+    it's obvious now why.  The manifestation of the ALSA stutter bug
+    depends on multiple factors and the relationship between them was
+    not obvious; it was impossible to control *every* variable remotely
+    (even if they *had* all been known at the time).
+    
+    Thanks must go to user "vectis" for providing several hardware
+    devices which allowed for the narrowing of the search space
+    sufficiently to finally home in on the cause.  Also to user "tokapix"
+    who provided additional proving testing.  But by far the biggest
+    contibution came from the original reporter user "GenghisKhan"
+    who stuck with the problem throughout its six year lifetime and
+    invested many hours in testing and debugging runs.
+    
+    It must be said that this problem would probably have been solved
+    much earlier if the ALSA Project had maintained its Bug Tracker.
+    
+    Thanks to: "GenghisKhan", "tokapix" and "vectis"
+    Resolves: node/692 (MOC is getting stuck after hours of playing)
+              node/903 (broken record syndrome)
+    Refs: [1] https://bugtrack.alsa-project.org/alsa-bug/view.php?id=5190
+          [2] https://bugtrack.alsa-project.org/wiki/wikka.php?wakka=HighDefinitionAudio
+          [3] https://sourceforge.net/p/alsa/mailman/message/32276614/
+          [4] https://archive.org/
+          [5] http://www.alsa-project.org/main/index.php/Main_Page
+          [6] http://achurch.org/notes.html#alsa-stutter
+    
+    git-svn-id: svn://svn.daper.net/moc/trunk@2922 910807d9-36e0-0310-a014-e9ea483e2ba4
+
+Index: x/moc-t1/alsa.c
+===================================================================
+--- x.orig/moc-t1/alsa.c	2022-01-17 10:34:21.230451227 +1300
++++ x/moc-t1/alsa.c	2022-01-17 10:38:00.837430857 +1300
+@@ -499,6 +499,17 @@ static int alsa_init (struct output_driv
+ 	if (result == 0)
+ 		goto err;
+ 
++	if (sizeof (long) < 8 && options_was_defaulted ("ALSAStutterDefeat")) {
++		fprintf (stderr,
++		         "\n"
++		         "Warning: Your system may be vulnerable to stuttering audio.\n"
++		         "         You should read the example configuration file comments\n"
++		         "         for the 'ALSAStutterDefeat' option and set it accordingly.\n"
++		         "         Setting the option will remove this warning.\n"
++		         "\n");
++		xsleep (5, 1);
++	}
++
+ 	if (0) {
+ 	err:
+ 		alsa_shutdown ();
+@@ -547,6 +558,14 @@ static int alsa_open (struct sound_param
+ 	bytes_per_sample = sfmt_Bps (sound_params->fmt);
+ 	logit ("Set sample width: %d bytes", bytes_per_sample);
+ 
++	if (options_get_bool ("ALSAStutterDefeat")) {
++		rc = snd_pcm_hw_params_set_rate_resample (handle, hw_params, 0);
++		if (rc == 0)
++			logit ("ALSA resampling disabled");
++		else
++			log_errno ("Unable to disable ALSA resampling", rc);
++	}
++
+ 	params.rate = sound_params->rate;
+ 	rc = snd_pcm_hw_params_set_rate_near (handle, hw_params, &params.rate, 0);
+ 	if (rc < 0) {
